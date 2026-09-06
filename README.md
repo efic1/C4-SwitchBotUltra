@@ -1,6 +1,6 @@
 # SwitchBot Lock Ultra — Control4 Driver
 
-[![CI](https://github.com/<YOUR-USER>/<YOUR-REPO>/actions/workflows/ci.yml/badge.svg)](https://github.com/<YOUR-USER>/<YOUR-REPO>/actions/workflows/ci.yml)
+[![CI](https://github.com/efic1/C4-SwitchBotUltra/actions/workflows/ci.yml/badge.svg)](https://github.com/efic1/C4-SwitchBotUltra/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **Version:** 1.1.0 · driver.xml `<version>` 114
