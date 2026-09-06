@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Tests and package validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Lua and zip
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.4 zip unzip
+
+      - name: Syntax check
+        run: |
+          luac5.4 -p src/driver.lua src/sbjson.lua
+          luac5.4 -p tests/test_driver.lua tests/test_json.lua
+
+      - name: Validate driver.xml is well-formed
+        run: python3 -c "import xml.dom.minidom; xml.dom.minidom.parse('src/driver.xml')"
+
+      - name: JSON tests
+        run: lua5.4 tests/test_json.lua
+
+      - name: Driver tests
+        run: lua5.4 tests/test_driver.lua
+
+      - name: Build package
+        run: ./package.sh
+
+      - name: Validate package layout
+        # Control4's packager emits no directory entries, and driver.xml must
+        # have no XML declaration. Composer's update mechanism depends on both.
+        run: |
+          python3 - <<'PY'
+          import zipfile, sys, re
+          z = zipfile.ZipFile('build/SwitchBotLockUltra.c4z')
+          names = z.namelist()
+          errors = []
+
+          dirs = [n for n in names if n.endswith('/')]
+          if dirs:
+              errors.append(f"archive contains directory entries: {dirs}")
+
+          xml = z.read('driver.xml').decode()
+          if xml.lstrip().startswith('<?xml'):
+              errors.append("driver.xml has an XML declaration")
+
+          for f in re.findall(r'file="([^"]+)"', xml):
+              if f not in names:
+                  errors.append(f"driver.xml references missing file: {f}")
+
+          for required in ('driver.xml', 'driver.lua'):
+              if required not in names:
+                  errors.append(f"missing {required}")
+
+          if errors:
+              for e in errors:
+                  print("FAIL:", e)
+              sys.exit(1)
+          print("Package layout OK:", names)
+          PY
+
+      - name: Check version consistency
+        # DRIVER_VERSION, the Driver Version property default and <version> must
+        # agree, or Composer reports a build that is not the one running.
+        run: |
+          python3 - <<'PY'
+          import re, sys
+          lua = open('src/driver.lua').read()
+          xml = open('src/driver.xml').read()
+
+          lua_ver = re.search(r"DRIVER_VERSION\s*=\s*'([\d.]+)'", lua).group(1)
+          prop = re.search(r'<name>Driver Version</name>.*?<default>([\d.]+)</default>', xml, re.S).group(1)
+          numeric = re.search(r'<version>(\d+)</version>', xml).group(1)
+
+          print(f"DRIVER_VERSION={lua_ver}  property default={prop}  <version>={numeric}")
+          if lua_ver != prop:
+              print(f"FAIL: DRIVER_VERSION ({lua_ver}) != Driver Version default ({prop})")
+              sys.exit(1)
+          PY
+
+      - name: Upload driver package
+        uses: actions/upload-artifact@v4
+        with:
+          name: SwitchBotLockUltra-c4z
+          path: build/SwitchBotLockUltra.c4z

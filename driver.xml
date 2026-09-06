@@ -1,0 +1,327 @@
+<devicedata>
+	<copyright>2026</copyright>
+	<creator>SwitchBot Lock Ultra Control4 Driver</creator>
+	<name>SwitchBot Lock Ultra</name>
+	<model>Lock Ultra</model>
+	<manufacturer>SwitchBot</manufacturer>
+	<driver>DriverWorks</driver>
+	<control>lua_gen</control>
+	<controlmethod>ip</controlmethod>
+	<version>114</version>
+	<created>09/05/2026 12:00 PM</created>
+	<modified>09/05/2026 9:00 PM</modified>
+	<composer_categories>
+		<category>Locks</category>
+	</composer_categories>
+	<proxies qty="1">
+		<proxy proxybindingid="5001" primary="True" name="SwitchBot Lock Ultra">lock</proxy>
+	</proxies>
+	<states />
+	<config>
+		<documentation file="www/documentation.html" />
+		<script jit="1" file="driver.lua"/>
+
+		<properties>
+			<property>
+				<name>Driver Version</name>
+				<type>STRING</type>
+				<readonly>true</readonly>
+				<default>1.1.0</default>
+			</property>
+
+			<!-- ============ SwitchBot Cloud credentials ============ -->
+			<property>
+				<name>OpenToken</name>
+				<type>STRING</type>
+				<readonly>false</readonly>
+				<password>true</password>
+				<default></default>
+			</property>
+			<property>
+				<name>SecretKey</name>
+				<type>STRING</type>
+				<readonly>false</readonly>
+				<password>true</password>
+				<default></default>
+			</property>
+
+			<!-- ============ Device selection ============ -->
+			<!--
+				Populated at runtime. After valid credentials are entered the driver
+				calls GET /v1.1/devices, filters for lock device types, and rewrites
+				this list via C4:UpdatePropertyList.
+			-->
+			<property>
+				<name>Device Selection</name>
+				<type>LIST</type>
+				<readonly>false</readonly>
+				<items>
+					<item>Select a device...</item>
+				</items>
+				<default>Select a device...</default>
+			</property>
+
+			<property>
+				<name>Partial Lock Reports As</name>
+				<type>LIST</type>
+				<readonly>false</readonly>
+				<items>
+					<item>Unlocked</item>
+					<item>Locked</item>
+				</items>
+				<default>Unlocked</default>
+			</property>
+
+			<!-- ============ Polling ============ -->
+			<property>
+				<name>Poll Frequency</name>
+				<type>LIST</type>
+				<readonly>false</readonly>
+				<items>
+					<item>30 seconds</item>
+					<item>60 seconds</item>
+					<item>300 seconds</item>
+				</items>
+				<default>60 seconds</default>
+			</property>
+
+			<property>
+				<name>Lock Contact Polarity</name>
+				<type>LIST</type>
+				<readonly>false</readonly>
+				<items>
+					<item>Closed = Locked</item>
+					<item>Closed = Unlocked</item>
+				</items>
+				<default>Closed = Locked</default>
+			</property>
+			<property>
+				<name>Door Contact Polarity</name>
+				<type>LIST</type>
+				<readonly>false</readonly>
+				<items>
+					<item>Closed = Door Shut</item>
+					<item>Closed = Door Open</item>
+				</items>
+				<default>Closed = Door Shut</default>
+			</property>
+			<property>
+				<name>Debug Mode</name>
+				<type>LIST</type>
+				<readonly>false</readonly>
+				<items>
+					<item>Off</item>
+					<item>Basic</item>
+					<item>Verbose</item>
+				</items>
+				<default>Off</default>
+			</property>
+
+			<!-- ============ Read-only diagnostics ============ -->
+			<property>
+				<name>Lock Status</name>
+				<type>STRING</type>
+				<readonly>true</readonly>
+				<default>Unknown</default>
+			</property>
+			<property>
+				<name>Lock Detail</name>
+				<type>STRING</type>
+				<readonly>true</readonly>
+				<default>Unknown</default>
+			</property>
+			<property>
+				<name>Door Status</name>
+				<type>STRING</type>
+				<readonly>true</readonly>
+				<default>Unknown</default>
+			</property>
+			<property>
+				<name>Battery Level</name>
+				<type>STRING</type>
+				<readonly>true</readonly>
+				<default>Unknown</default>
+			</property>
+			<property>
+				<name>Last Sync</name>
+				<type>STRING</type>
+				<readonly>true</readonly>
+				<default>Never</default>
+			</property>
+			<property>
+				<name>Connection Status</name>
+				<type>STRING</type>
+				<readonly>true</readonly>
+				<default>Not configured</default>
+			</property>
+		</properties>
+
+		<actions>
+			<action>
+				<name>Discover Devices</name>
+				<command>DISCOVER_DEVICES</command>
+			</action>
+			<action>
+				<name>Refresh Status</name>
+				<command>REFRESH_STATUS</command>
+			</action>
+			<action>
+				<name>Test Connection</name>
+				<command>TEST_CONNECTION</command>
+			</action>
+			<action>
+				<name>Log Raw Status</name>
+				<command>LOG_RAW_STATUS</command>
+			</action>
+			<action>
+				<name>Resend Contact State</name>
+				<command>RESEND_CONTACT_STATE</command>
+			</action>
+			<action>
+				<name>Send Deadbolt Command</name>
+				<command>SEND_DEADBOLT_COMMAND</command>
+			</action>
+		</actions>
+
+		<commands>
+			<command>
+				<name>Refresh Status</name>
+				<description>Poll SwitchBot for current NAME state</description>
+			</command>
+		</commands>
+	</config>
+	<connections>
+		<connection>
+			<id>5001</id>
+			<facing>6</facing>
+			<type>2</type>
+			<connectionname>Lock</connectionname>
+			<consumer>false</consumer>
+			<audiosource>false</audiosource>
+			<videosource>false</videosource>
+			<linelevel>false</linelevel>
+			<classes>
+				<class>
+					<classname>LOCK</classname>
+				</class>
+			</classes>
+			<hidden>True</hidden>
+		</connection>
+		<connection>
+			<id>300</id>
+			<facing>6</facing>
+			<type>1</type>
+			<connectionname>Lock Control</connectionname>
+			<consumer>False</consumer>
+			<classes>
+				<class>
+					<classname>RELAY</classname>
+				</class>
+			</classes>
+		</connection>
+		<connection>
+			<id>400</id>
+			<facing>6</facing>
+			<type>1</type>
+			<connectionname>Lock State</connectionname>
+			<consumer>False</consumer>
+			<classes>
+				<class>
+					<classname>CONTACT_SENSOR</classname>
+				</class>
+			</classes>
+		</connection>
+		<connection>
+			<id>401</id>
+			<facing>6</facing>
+			<type>1</type>
+			<connectionname>Door State</connectionname>
+			<consumer>False</consumer>
+			<classes>
+				<class>
+					<classname>CONTACT_SENSOR</classname>
+				</class>
+			</classes>
+		</connection>
+	</connections>
+	<capabilities>
+		<!-- Names taken verbatim from Control4's official lock_proxy template
+		     (lock_main.lua). The proxy reads these via C4:GetCapability(); an
+		     empty <capabilities> block leaves every one of them nil, which is
+		     why the driver was never offered as a lock in Navigator.
+		     This driver exposes lock/unlock and telemetry only - no user
+		     codes, keypad settings or on-device history - so the management
+		     capabilities are all declared false. -->
+		<is_management_only>false</is_management_only>
+		<has_admin_code>false</has_admin_code>
+		<has_schedule_lockout>false</has_schedule_lockout>
+		<has_auto_lock_time>false</has_auto_lock_time>
+		<auto_lock_time_values>0</auto_lock_time_values>
+		<auto_lock_time_display_values>OFF</auto_lock_time_display_values>
+		<has_log_item_count>false</has_log_item_count>
+		<log_item_count_values>1</log_item_count_values>
+		<has_lock_modes>false</has_lock_modes>
+		<lock_modes_values>normal</lock_modes_values>
+		<has_log_failed_attempts>false</has_log_failed_attempts>
+		<has_wrong_code_attempts>false</has_wrong_code_attempts>
+		<wrong_code_attempts_values>1</wrong_code_attempts_values>
+		<has_shutout_timer>false</has_shutout_timer>
+		<shutout_timer_values>5</shutout_timer_values>
+		<shutout_timer_display_values>5sec</shutout_timer_display_values>
+		<has_language>false</has_language>
+		<language_values>English</language_values>
+		<has_volume>false</has_volume>
+		<has_one_touch_locking>false</has_one_touch_locking>
+		<has_daily_schedule>false</has_daily_schedule>
+		<has_date_range_schedule>false</has_date_range_schedule>
+		<max_users>0</max_users>
+		<has_settings>false</has_settings>
+		<has_custom_settings>false</has_custom_settings>
+		<has_internal_history>false</has_internal_history>
+		<can_edit_user>false</can_edit_user>
+		<can_edit_user_pin>false</can_edit_user_pin>
+		<can_add_remove_user>false</can_add_remove_user>
+	</capabilities>
+	<events>
+		<event>
+			<id>1</id>
+			<name>Lock Jammed</name>
+			<description>NAME reported a jam</description>
+		</event>
+		<event>
+			<id>2</id>
+			<name>Calibration Error</name>
+			<description>NAME reported a calibration error</description>
+		</event>
+		<event>
+			<id>3</id>
+			<name>Door Opened</name>
+			<description>NAME door opened</description>
+		</event>
+		<event>
+			<id>4</id>
+			<name>Door Closed</name>
+			<description>NAME door closed</description>
+		</event>
+		<event>
+			<id>5</id>
+			<name>Door Left Open</name>
+			<description>NAME door left open</description>
+		</event>
+		<event>
+			<id>6</id>
+			<name>Low Battery</name>
+			<description>NAME battery below threshold</description>
+		</event>
+		<event>
+			<id>7</id>
+			<name>Communication Failure</name>
+			<description>NAME lost communication with SwitchBot cloud</description>
+		</event>
+		<event>
+			<id>8</id>
+			<name>Communication Restored</name>
+			<description>NAME restored communication with SwitchBot cloud</description>
+		</event>
+	</events>
+</devicedata>
