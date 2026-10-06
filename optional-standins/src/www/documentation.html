@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>SwitchBot Lock Ultra - Control4 Driver</title>
+<!-- Stand-in documentation generated from the README. Replace with the
+     repository's own www/documentation.html if you maintain one. -->
+<style>
+	body { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; margin: 20px; line-height: 1.5; color: #222; max-width: 900px; }
+	h1 { font-size: 22px; margin-bottom: 4px; }
+	h2 { font-size: 17px; margin-top: 28px; border-bottom: 1px solid #ccc; padding-bottom: 3px; }
+	table { border-collapse: collapse; width: 100%; margin: 10px 0; }
+	th, td { border: 1px solid #ccc; padding: 6px 9px; text-align: left; vertical-align: top; font-size: 13px; }
+	th { background: #f2f2f2; }
+	code { background: #f2f2f2; padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+	.warn { border-left: 4px solid #c33; background: #fbeeee; padding: 8px 12px; margin: 12px 0; }
+</style>
+</head>
+<body>
+
+<h1>SwitchBot Lock Ultra &mdash; Control4 Driver</h1>
+<div>Version 1.2.0</div>
+
+<h2>Overview</h2>
+<p>Two-way integration between the <b>SwitchBot Lock Ultra</b> and Control4 through the SwitchBot
+Open Cloud API v1.1. The driver locks and unlocks the deadbolt, reports lock state, door state and
+battery level, and exposes events for Composer programming.</p>
+<p>Like most cloud locks in Control4, this driver is the <i>backend</i>. The device the end user sees in
+Navigator is Control4's generic <b>Door Lock</b> driver, bound to this one.</p>
+
+<h2>Requirements</h2>
+<ul>
+	<li>Control4 OS 3.3.0 or later</li>
+	<li>A <b>SwitchBot Hub</b> (Hub Mini, Hub 2 or later) paired to the lock, with <b>Cloud Services enabled</b></li>
+	<li>A SwitchBot <b>OpenToken</b> and <b>Secret Key</b></li>
+	<li>Controller with outbound HTTPS access to <code>api.switch-bot.com</code></li>
+	<li>The lock must be controllable from the SwitchBot app, including remotely, before integrating</li>
+</ul>
+
+<h2>Obtaining the API credentials</h2>
+<ol>
+	<li>In the SwitchBot app: <b>Profile &rarr; Preferences &rarr; About</b></li>
+	<li>Tap <b>App Version</b> ten times to reveal <b>Developer Options</b></li>
+	<li>Copy the <b>Token</b> and the <b>Secret Key</b></li>
+</ol>
+
+<h2>Installation</h2>
+<ol>
+	<li>In Composer Pro, <b>System Design &rarr; Search</b>, add <b>SwitchBot Lock Ultra</b> to the room.</li>
+	<li>On the <b>Properties</b> tab, paste <b>OpenToken</b> and <b>SecretKey</b>.</li>
+	<li><b>Actions &rarr; Test Connection.</b> The Lua output reports success and the device count.</li>
+	<li><b>Actions &rarr; Discover Devices</b>, then choose the lock in <b>Device Selection</b>.</li>
+	<li>Set <b>Poll Frequency</b>.</li>
+	<li>Add <b>My Drivers &rarr; Motorization &rarr; Door Lock</b> to the same room. This is the device that appears in Navigator.</li>
+	<li>Add a <b>Door Contact</b> sensor to the room for door state in the UI.</li>
+</ol>
+
+<h2>Connections</h2>
+<table>
+	<tr><th>This driver's binding</th><th>Connect to</th></tr>
+	<tr><td><b>Lock Control</b> (Relay)</td><td>The Door Lock driver's <b>Relay</b> binding</td></tr>
+	<tr><td><b>Door State</b> (Contact)</td><td>The Door Contact sensor</td></tr>
+	<tr><td><b>Lock State</b> (Contact)</td><td>Optional: lock state as a separate contact sensor</td></tr>
+</table>
+<p>Refresh Navigators when finished.</p>
+
+<h2>Properties</h2>
+<table>
+	<tr><th>Property</th><th>Description</th></tr>
+	<tr><td>Driver Version</td><td>Read-only. Confirms which build is running.</td></tr>
+	<tr><td>OpenToken / SecretKey</td><td>SwitchBot developer credentials. Every request is signed with them.</td></tr>
+	<tr><td>Device Selection</td><td>Populated by Discover Devices. Shown as <code>Name (deviceId)</code>.</td></tr>
+	<tr><td>Partial Lock Reports As</td><td>How a latch-bolt or half-lock position is reported. Default <b>Unlocked</b>.</td></tr>
+	<tr><td>Poll Frequency</td><td>30, 60 or 300 seconds. Default 60.</td></tr>
+	<tr><td>Lock Contact Polarity</td><td><code>Closed = Locked</code> (default) or inverted.</td></tr>
+	<tr><td>Door Contact Polarity</td><td><code>Closed = Door Shut</code> (default) or inverted.</td></tr>
+	<tr><td>Debug Mode</td><td>Off / Basic / Verbose. Errors always print.</td></tr>
+	<tr><td>Lock Status</td><td>Read-only: locked, unlocked, fault or unknown.</td></tr>
+	<tr><td>Lock Detail</td><td>Read-only. The underlying state, including partial, moving, stuck and stale conditions.</td></tr>
+	<tr><td>Door Status / Battery Level / Last Sync / Connection Status</td><td>Read-only diagnostics.</td></tr>
+</table>
+
+<h2>Actions</h2>
+<table>
+	<tr><th>Action</th><th>Description</th></tr>
+	<tr><td>Discover Devices</td><td>Queries the SwitchBot account and populates Device Selection.</td></tr>
+	<tr><td>Refresh Status</td><td>Forces an immediate poll.</td></tr>
+	<tr><td>Test Connection</td><td>Verifies credentials and reports the device count.</td></tr>
+	<tr><td>Log Raw Status</td><td>Prints the exact SwitchBot response next to what the driver concluded, regardless of Debug Mode.</td></tr>
+	<tr><td>Resend Contact State</td><td>Re-publishes contact state without restarting Director.</td></tr>
+	<tr><td>Send Deadbolt Command</td><td>Sends SwitchBot's <code>deadbolt</code> command. Its behavior is ambiguous; test on the bench before using it in programming.</td></tr>
+</table>
+
+<h2>Programming events</h2>
+<table>
+	<tr><th>Event</th><th>Fires when</th></tr>
+	<tr><td>Lock Jammed</td><td>The motor reports jammed or blocked. Fires once, when the fault begins.</td></tr>
+	<tr><td>Calibration Error</td><td>The lock reports it is not calibrated. Fires once, when the fault begins.</td></tr>
+	<tr><td>Door Opened / Door Closed</td><td>Door state changes. Not raised for the first reading after a restart.</td></tr>
+	<tr><td>Door Left Open</td><td>The door has been open for five minutes.</td></tr>
+	<tr><td>Low Battery</td><td>Battery drops below 15%. Fires once per crossing.</td></tr>
+	<tr><td>Communication Failure / Restored</td><td>Repeated failures reaching the SwitchBot cloud, and recovery.</td></tr>
+</table>
+<div class="warn"><b>Do not treat the Door Lock tile as proof the door is secured.</b> A relay is an output,
+so that tile reflects what Control4 commanded, not what the bolt did. For conditional logic that depends on
+the door genuinely being locked, use this driver's <b>Lock Status</b> property or the <b>Lock State</b>
+contact. Both come from polled device telemetry.</div>
+
+<h2>Lock states</h2>
+<table>
+	<tr><th>SwitchBot state</th><th>Reported to Control4</th></tr>
+	<tr><td><code>lock</code></td><td>locked</td></tr>
+	<tr><td><code>unlock</code></td><td>unlocked</td></tr>
+	<tr><td><code>latchBoltLocked</code>, <code>halfLocked</code>, <code>notFullyLocked</code></td><td>per <b>Partial Lock Reports As</b> (deadbolt not fully thrown). If the door is open this is <b>never</b> reported as locked.</td></tr>
+	<tr><td><code>jammed</code>, <code>lockingStop</code>, <code>unlockingStop</code></td><td>fault (also fires Lock Jammed)</td></tr>
+	<tr><td><code>locking</code>, <code>unlocking</code></td><td>previous state held while the motor moves; re-checked up to six times, then reported unknown</td></tr>
+	<tr><td>anything unrecognised</td><td>unknown; the full API payload is logged</td></tr>
+</table>
+
+<h2>Notes</h2>
+<ul>
+	<li><b>Polling, not webhooks.</b> SwitchBot pushes events to a publicly reachable HTTPS URL, which a controller behind NAT cannot receive. The driver polls instead.</li>
+	<li><b>API limits.</b> SwitchBot allows roughly 10,000 calls per day per account, shared by every application using it. One lock at 30-second polling uses about 2,880 calls per day; at 60 seconds, about 1,440. Each command adds one request plus a few verification reads.</li>
+	<li><b>Commands are verified.</b> The cloud accepting a command is not treated as proof the bolt moved; the driver re-reads the real state before updating the UI.</li>
+	<li><b>No user codes or lock history.</b> Lock, unlock and telemetry only.</li>
+</ul>
+
+<h2>Troubleshooting</h2>
+<table>
+	<tr><th>Symptom</th><th>Check</th></tr>
+	<tr><td>Wrong version shown</td><td>The load banner names the running build: <code>SwitchBot Lock Ultra driver v1.2.0 loaded</code>. If absent, restart Composer Pro, then Update Driver.</td></tr>
+	<tr><td>Lock Status stays unknown</td><td>Set Debug Mode to Basic. An unrecognised state logs the full API payload.</td></tr>
+	<tr><td>Lock Detail says STALE</td><td>No successful poll for three intervals. Check Connection Status and Last Sync.</td></tr>
+	<tr><td>Lock Detail says Stuck</td><td>The cloud kept reporting locking/unlocking. Run Log Raw Status and compare with the SwitchBot app.</td></tr>
+	<tr><td>Device Selection empty</td><td>Run Test Connection, then Discover Devices.</td></tr>
+	<tr><td>State disagrees with the lock</td><td>Run Log Raw Status and compare against the SwitchBot app.</td></tr>
+	<tr><td>Lock or door state inverted</td><td>Flip Lock Contact Polarity or Door Contact Polarity.</td></tr>
+	<tr><td>Contact bound but never updates</td><td>Run Resend Contact State.</td></tr>
+	<tr><td>Authentication failures</td><td>Requests are timestamp-signed. Confirm the controller clock is correct.</td></tr>
+	<tr><td>Nothing appears in Navigator</td><td>Confirm the Door Lock driver is in the room and its Relay is bound, then refresh Navigators.</td></tr>
+</table>
+
+</body>
+</html>

@@ -3,6 +3,29 @@
 All notable changes to this driver. Versions map to `driver.xml` `<version>`,
 which Control4 uses to detect updates.
 
+**1.2.0** — Reliability release.
+- Lock/unlock commands, the reads that verify them, and manual Composer actions
+  are no longer suppressed by back-off. Only background polling is.
+- A failed command now reliably re-reads the real lock state.
+- A command is tracked for 15 seconds after the cloud accepts it. Cloud
+  telemetry that lags the motor is no longer logged as a failure, and a
+  command that never confirms expires instead of mislabelling later keypad
+  changes as Control4 actions. Verification reads stop once confirmed.
+- The first reading after boot, a device change, or stale recovery is an
+  initial sync: reported as not manual, and without Door Opened / Door Closed
+  events. A door found open still raises Door Left Open.
+- Lock Jammed and Calibration Error fire once when the fault begins, not on
+  every poll while it persists.
+- A lock stuck reporting `locking` / `unlocking` is re-checked at most six
+  times, then reported unknown, instead of being polled every two seconds
+  indefinitely.
+- Startup request burst removed: property changes replayed at load are ignored
+  until initialisation completes, credential changes are debounced, and
+  re-selecting the same lock (including after a rename) does nothing.
+- Changing the selected lock now resets all per-device state and notifies the
+  proxy.
+- New test suite (50 tests) against a mocked controller.
+
 **1.1.0** — Documentation rewritten as an installation and usage guide. Battery
 status no longer re-sent on every poll. Removed a dead state field and a stale
 comment.

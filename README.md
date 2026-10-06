@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**Version:** 1.1.0 · driver.xml `<version>` 114
+**Version:** 1.2.0 · driver.xml `<version>` 115
 
 ---
 
@@ -18,7 +18,6 @@
 - [FAQ](#faq)
 - [Troubleshooting](#troubleshooting)
 - [Building from source](#building-from-source)
-- [Status](#status)
 
 ---
 
@@ -38,6 +37,8 @@ this one. This is the same architecture Yale's own Control4 driver uses.
 ## Features
 
 - Lock, Unlock and Toggle
+- Commands are verified: the cloud accepting a command is not taken as proof the
+  bolt moved, so the real state is re-read before the UI is updated
 - Real-time lock state: locked, unlocked, fault, and partial (latch / half-lock)
 - Door open/closed state via a Door Contact sensor
 - Battery level reporting, with a low-battery event below 15%
@@ -115,7 +116,7 @@ Refresh Navigators when finished.
 | Door Contact Polarity | `Closed = Door Shut` (default) or inverted. |
 | Debug Mode | Off / Basic / Verbose. Errors always print regardless. |
 | Lock Status | Read-only. `locked`, `unlocked`, `fault` or `unknown`. |
-| Lock Detail | Read-only. The raw underlying state, including partial and stale conditions. |
+| Lock Detail | Read-only. The raw underlying state, including partial, moving, stuck and stale conditions. |
 | Door Status | Read-only. `open` or `closed`. |
 | Battery Level | Read-only percentage. |
 | Last Sync | Read-only timestamp of the last successful poll. |
@@ -134,15 +135,18 @@ Refresh Navigators when finished.
 | Resend Contact State | Re-publishes contact state without restarting Director. |
 | Send Deadbolt Command | Sends SwitchBot's `deadbolt` command. See the [FAQ](#what-does-send-deadbolt-command-do). |
 
+Actions, lock/unlock commands and the reads that verify them are sent even while
+the driver is backing off after a failure. Only background polling is held back.
+
 ---
 
 ## Programming
 
 | Event | Fires when |
 | --- | --- |
-| Lock Jammed | The motor reports jammed or blocked. |
-| Calibration Error | The lock reports it is not calibrated. |
-| Door Opened / Door Closed | Door state changes. |
+| Lock Jammed | The motor reports jammed or blocked. Fires once, when the fault begins. |
+| Calibration Error | The lock reports it is not calibrated. Fires once, when the fault begins. |
+| Door Opened / Door Closed | Door state changes. Not raised for the first reading after a restart. |
 | Door Left Open | The door has been open for five minutes. |
 | Low Battery | Battery drops below 15%. Fires once per crossing. |
 | Communication Failure | Repeated failures reaching the SwitchBot cloud. |
@@ -167,7 +171,7 @@ maps them:
 | `unlock` | unlocked | |
 | `latchBoltLocked`, `halfLocked`, `notFullyLocked` | per **Partial Lock Reports As** | Deadbolt **not** fully thrown. |
 | `jammed`, `lockingStop`, `unlockingStop` | fault | Also fires Lock Jammed. |
-| `locking`, `unlocking` | *unchanged* | Motor mid-travel; holds the previous state and re-checks. |
+| `locking`, `unlocking` | *unchanged* | Motor mid-travel; holds the previous state and re-checks up to six times, then reports unknown. |
 | anything unrecognised | unknown | Logs the full API payload. |
 
 ### Partial states and the door-open rule
@@ -180,6 +184,13 @@ door as Locked asserts security that does not exist.
 **One rule cannot be configured:** if the door is **open**, a partial state is
 never reported as locked. Opening a door lets the latch bolt spring out, which
 makes the lock report `latchBoltLocked`; an open door must never read as Locked.
+
+### After a restart
+
+The first reading after Director starts, a driver update, a change of selected
+lock, or recovery from a stale period is treated as an *initial sync*. It is
+reported to Control4 as not a manual action, and raises no Door Opened / Door
+Closed event. A door found open still raises Door Left Open after five minutes.
 
 ---
 
@@ -203,8 +214,9 @@ the driver polls.
 
 SwitchBot allows roughly **10,000 calls per day per account**, shared across every
 application using that account. One lock at 30-second polling uses about 2,880
-calls per day; at 60 seconds, about 1,440. Check the arithmetic before deploying
-several locks on one account.
+calls per day; at 60 seconds, about 1,440. Each lock or unlock adds one command
+plus up to three verification reads, which stop as soon as the command is
+confirmed. Check the arithmetic before deploying several locks on one account.
 
 ### What does Send Deadbolt Command do?
 
@@ -225,9 +237,10 @@ only.
 
 | Symptom | Check |
 | --- | --- |
-| Wrong version shown | The load banner names the running build: `SwitchBot Lock Ultra driver v1.1.0 loaded`. If absent, the update did not land — restart Composer Pro, then **Update Driver**. |
+| Wrong version shown | The load banner names the running build: `SwitchBot Lock Ultra driver v1.2.0 loaded`. If absent, the update did not land — restart Composer Pro, then **Update Driver**. |
 | Lock Status stays `unknown` | Set Debug Mode to **Basic**. An unrecognised state logs the full API payload. |
 | Lock Detail says `STALE` | No successful poll for three intervals. Check **Connection Status** and **Last Sync**. |
+| Lock Detail says `Stuck` | The cloud kept reporting `locking` / `unlocking`. Run **Log Raw Status** and compare against the SwitchBot app. |
 | Device Selection empty | Run **Test Connection**, then **Discover Devices**. |
 | Driver state disagrees with the lock | Run **Log Raw Status** and compare against the SwitchBot app. If Lock Detail says `Partial:`, see [Lock states](#lock-states-explained). |
 | Lock or door state inverted | Flip **Lock Contact Polarity** or **Door Contact Polarity**. |
@@ -240,23 +253,32 @@ only.
 ## Building from source
 
 ```bash
-sudo apt-get install -y lua5.4 zip
-lua5.4 tests/test_json.lua      #  39 tests - JSON encode/decode
-lua5.4 tests/test_driver.lua    # 190 tests - driver logic against a mocked C4 API
+sudo apt-get install -y lua5.4 zip unzip
+lua5.4 tests/test_json.lua      # JSON encode/decode
+lua5.4 tests/test_driver.lua    # 50 tests - driver logic against a mocked C4 API
 ./package.sh                    # -> build/SwitchBotLockUltra.c4z
 ```
+
+`package.sh` refuses to build if `driver.xml` has an XML declaration, a Lua file
+has a syntax error, a file referenced by `driver.xml` is missing, or
+`DRIVER_VERSION` and the Driver Version default disagree. It also verifies the
+finished archive has no directory entries.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the repository layout, the safety
 rules the driver must preserve, and the packaging constraints Composer depends
 on.
 
-Tests cover state mapping for every documented SwitchBot state, the door-open
-safety rule, jam and calibration handling, failed-command rollback, battery
-thresholds, contact de-duplication and polarity, back-off, staleness, discovery,
-the proxy handshake, and credential redaction in logs. Request signing is
-cross-checked against Python's `hmac`/`hashlib`.
+The driver tests run against a *model* of the DriverWorks API: a fake clock,
+timers that fire only when the test advances time, and a fake SwitchBot cloud.
+They cover state mapping for every documented SwitchBot state, the door-open
+safety rule, jam and calibration handling, command confirmation and expiry,
+failed-command recovery, back-off behaviour, battery thresholds, contact
+de-duplication and polarity, staleness, discovery, the startup sequence, the
+proxy handshake, and credential redaction in logs.
 
-
+They do **not** cover whether Director loads the driver, whether Navigator
+renders the proxy notifications, or whether request signatures validate against
+SwitchBot — `C4:Hash` is faked. Those need a real controller.
 
 ---
 
