@@ -1,6 +1,6 @@
 --[[============================================================================
 	SwitchBot Lock Ultra - Control4 DriverWorks driver
-	Version 1.1.0
+	Version 1.2.0
 
 	Transport : SwitchBot Open Cloud API v1.1 over HTTPS (device must be paired
 	            to a SwitchBot Hub with cloud services enabled)
@@ -19,12 +19,24 @@
 	  C4:GetTime()                   -> wall clock milliseconds
 	  C4:SendToProxy(5001, 'LOCK_STATUS_CHANGED', {LOCK_STATUS=...}, 'NOTIFY')
 	  C4:SendToProxy(5001, 'BATTERY_STATUS_CHANGED', {BATTERY_STATUS=...}, 'NOTIFY')
+
+	1.2.0 changes
+	  - Commands, their verification reads and manual actions bypass back-off;
+	    only background polling is suppressed by it.
+	  - First read after boot / device change / stale recovery is an initial
+	    sync: no "manual" attribution, no Door Opened/Closed events.
+	  - Lock Jammed / Calibration Error fire on entry to the fault, not per poll.
+	  - Pending command is time-windowed (no false "did not take effect" from
+	    the first confirm poll, no permanent mis-attribution of later changes).
+	  - Transitional (locking/unlocking) re-polls are capped.
+	  - Property-change handlers are ignored until OnDriverLateInit has run, and
+	    credential changes are debounced, removing the startup request burst.
 ==============================================================================]]
 
 JSON = require ('sbjson')
 
 do	-- Constants
-	DRIVER_VERSION      = '1.1.0'
+	DRIVER_VERSION      = '1.2.0'
 
 	API_BASE            = 'https://api.switch-bot.com'
 	PATH_DEVICES        = '/v1.1/devices'
@@ -46,9 +58,19 @@ do	-- Constants
 	LOW_BATTERY_PCT      = 15		-- below this: warning (and Low Battery event)
 	CRITICAL_BATTERY_PCT = 5		-- below this: critical
 	DOOR_LEFT_OPEN_MS   = 5 * 60 * 1000
-	CONFIRM_DELAY_MS    = 2000		-- re-poll after a command to confirm real state
+	CONFIRM_DELAY_MS    = 2000		-- first re-poll after a command
 	REQUEST_TIMEOUT_MS  = 10000
 	LATENCY_BUDGET_MS   = 2500		-- PRD 4
+
+	-- A command is "ours" (and expected to show up in telemetry) for this long
+	-- after the cloud acknowledges it. Cloud status commonly lags the motor.
+	PENDING_WINDOW_MS        = 15000
+	-- locking/unlocking is re-polled at CONFIRM_DELAY_MS this many times, then
+	-- the state is reported unknown and normal polling resumes.
+	MAX_TRANSITIONAL_RETRIES = 6
+	-- Dealers paste OpenToken then SecretKey; collapse the two changes into one
+	-- discovery + polling restart.
+	CREDENTIAL_DEBOUNCE_MS   = 1500
 
 	BACKOFF_BASE_MS     = 5000
 	BACKOFF_MAX_MS      = 300000
@@ -82,7 +104,7 @@ do	-- Driver state
 	Timers = Timers or {}
 
 	State = State or {
-		lockState        = 'unknown',	-- locked | unlocked | unknown
+		lockState        = 'unknown',	-- locked | unlocked | fault | unknown
 		doorState        = 'unknown',	-- open | closed | unknown
 		batteryPct       = nil,
 		batteryStatus    = nil,
@@ -94,11 +116,17 @@ do	-- Driver state
 		commFailureFired = false,
 
 		pendingCommand   = nil,
+		pendingSince     = nil,		-- Now() when the pending command was acked
 		inFlight         = false,
 		initialized      = false,
 		contact          = {},
 		lastGoodSync     = nil,
 		stale            = false,
+
+		activeFault        = nil,		-- 'jam' | 'calibration' | nil
+		transitionalRetries = 0,
+		ready              = false,	-- true once OnDriverLateInit has run
+		activeDeviceId     = nil,
 	}
 end
 
@@ -285,11 +313,18 @@ end
 -- ============================================================================
 -- HTTP
 -- callback (ok, body, httpCode)
+--
+-- opts.bypassBackoff = true: send even while backing off. Used for user
+-- commands, the reads that verify them, and manual Composer actions. Back-off
+-- exists to stop background polling hammering a failing/throttled API; it must
+-- not swallow a person pressing Lock, or the read that tells the UI the truth.
+-- A failure of a bypassing request still extends the back-off.
 -- ============================================================================
 
-local function ApiRequest (method, path, bodyTable, callback)
+local function ApiRequest (method, path, bodyTable, callback, opts)
 	local token  = Properties ['OpenToken'] or ''
 	local secret = Properties ['SecretKey'] or ''
+	local bypass = (type (opts) == 'table' and opts.bypassBackoff == true)
 
 	if (token == '' or secret == '') then
 		DbgBasic ('request skipped: credentials not set')
@@ -297,7 +332,7 @@ local function ApiRequest (method, path, bodyTable, callback)
 		return
 	end
 
-	if (InBackoff ()) then
+	if (InBackoff () and not bypass) then
 		DbgVerbose ('request suppressed, in back-off: ' .. path)
 		if (callback) then callback (false, nil, nil) end
 		return
@@ -308,7 +343,7 @@ local function ApiRequest (method, path, bodyTable, callback)
 	local data    = (bodyTable ~= nil) and JSON:encode (bodyTable) or ''
 	local started = Now ()
 
-	DbgVerbose ('--> ' .. method .. ' ' .. url)
+	DbgVerbose ('--> ' .. method .. ' ' .. url .. (bypass and '  (bypassing back-off)' or ''))
 	DbgVerbose ('    headers: ' .. RedactHeaders (headers))
 	if (data ~= '') then
 		DbgVerbose ('    body:    ' .. data)
@@ -522,7 +557,14 @@ end
 local function UpdateDoorState (newState)
 	if (newState == State.doorState) then return end
 
-	DbgBasic ('door state: ' .. tostring (State.doorState) .. ' -> ' .. tostring (newState))
+	local previous = State.doorState
+	-- The first door reading after boot, a device change or a state reset is a
+	-- sync, not an event. Without this every Director restart announced a
+	-- "Door Opened" or "Door Closed" that nobody caused.
+	local initial = (previous == nil or previous == 'unknown')
+
+	DbgBasic ('door state: ' .. tostring (previous) .. ' -> ' .. tostring (newState) ..
+		(initial and '  (initial sync, no event)' or ''))
 	State.doorState = newState
 	C4:UpdateProperty ('Door Status', newState)
 
@@ -533,8 +575,10 @@ local function UpdateDoorState (newState)
 	NotifyContact (DOOR_STATE_BINDING, doorClosed)
 
 	if (newState == 'open') then
-		C4:FireEvent ('Door Opened')
+		if (not initial) then C4:FireEvent ('Door Opened') end
 		State.doorLeftOpenFired = false
+		-- Also started on an initial sync: how long it has been open is not
+		-- known, and a door found open after a reboot should still be flagged.
 		StartTimer ('doorLeftOpen', DOOR_LEFT_OPEN_MS, function ()
 			if (State.doorState == 'open' and not State.doorLeftOpenFired) then
 				State.doorLeftOpenFired = true
@@ -543,7 +587,7 @@ local function UpdateDoorState (newState)
 		end, false)
 
 	elseif (newState == 'closed') then
-		C4:FireEvent ('Door Closed')
+		if (not initial) then C4:FireEvent ('Door Closed') end
 		State.doorLeftOpenFired = false
 		CancelTimer ('doorLeftOpen')
 	end
@@ -563,8 +607,8 @@ end
 --   'secure'      -> report locked
 --   'open'        -> report unlocked
 --   'partial'     -> deadbolt not fully thrown; dealer decides (see property)
---   'fault'       -> motor blocked/jammed; report unknown + fire event
---   'transitional'-> motor still moving; hold last state and re-poll
+--   'fault'       -> motor blocked/jammed; report fault + fire event
+--   'transitional'-> motor still moving; hold last state and re-poll (capped)
 local LOCK_STATE_MAP = {
 	lock             = 'secure',
 	locked           = 'secure',
@@ -589,17 +633,56 @@ local LOCK_STATE_MAP = {
 	unlocking        = 'transitional',
 }
 
+-- ----------------------------------------------------------------------------
+-- Pending-command tracking
+--
+-- A command we issued is "ours" for PENDING_WINDOW_MS after the cloud acks it.
+-- Telemetry that has not caught up yet is not a failure, and a change that
+-- arrives inside the window is attributed to Control4 rather than to the door.
+-- ----------------------------------------------------------------------------
+
+local function PendingActive ()
+	return State.pendingCommand ~= nil and
+		(Now () - (State.pendingSince or 0)) < PENDING_WINDOW_MS
+end
+
+local function ClearPending ()
+	State.pendingCommand = nil
+	State.pendingSince = nil
+	-- Nothing left to confirm: stop spending API quota on verification reads.
+	CancelTimer ('confirm')
+	CancelTimer ('confirm2')
+	CancelTimer ('confirm3')
+	CancelTimer ('pendingExpiry')
+end
+
+-- Jam / calibration events fire when the fault is entered, not on every poll
+-- while it persists. Cleared when the lock reports a real locked/unlocked state.
+local function FireFaultOnce (kind, eventName)
+	if (State.activeFault ~= kind) then
+		State.activeFault = kind
+		C4:FireEvent (eventName)
+	else
+		DbgVerbose ('fault "' .. kind .. '" still present; event already fired')
+	end
+end
+
 local function ApplyStatus (status)
 	if (type (status) ~= 'table') then return end
 
 	local raw = NormalizeState (status.lockState)
 	local kind = LOCK_STATE_MAP [raw]
 	local mapped
+	local ours = PendingActive ()
+
+	if (kind ~= 'transitional') then
+		State.transitionalRetries = 0
+	end
 
 	if (status.calibrate == false) then
 		mapped = 'fault'
 		C4:UpdateProperty ('Lock Detail', 'Not calibrated')
-		C4:FireEvent ('Calibration Error')
+		FireFaultOnce ('calibration', 'Calibration Error')
 
 	elseif (kind == 'secure') then
 		mapped = 'locked'
@@ -640,15 +723,35 @@ local function ApplyStatus (status)
 	elseif (kind == 'fault') then
 		mapped = 'fault'
 		C4:UpdateProperty ('Lock Detail', 'Fault: ' .. tostring (status.lockState))
-		C4:FireEvent ('Lock Jammed')
+		FireFaultOnce ('jam', 'Lock Jammed')
 
 	elseif (kind == 'transitional') then
 		-- Motor is still moving. Do not publish a state mid-travel; hold the
-		-- last known one and look again shortly.
-		DbgBasic ('lock is mid-travel (' .. tostring (status.lockState) .. '), re-checking')
-		C4:UpdateProperty ('Lock Detail', 'Moving: ' .. tostring (status.lockState))
-		StartTimer ('transitional', CONFIRM_DELAY_MS, RefreshStatus, false)
-		mapped = nil
+		-- last known one and look again shortly - but only a bounded number of
+		-- times. A cloud that sticks on locking/unlocking would otherwise be
+		-- polled every CONFIRM_DELAY_MS indefinitely (and, because each read
+		-- counts as a good sync, the staleness guard would never trip).
+		State.transitionalRetries = (State.transitionalRetries or 0) + 1
+
+		if (State.transitionalRetries <= MAX_TRANSITIONAL_RETRIES) then
+			DbgBasic ('lock is mid-travel (' .. tostring (status.lockState) ..
+				'), re-checking (' .. State.transitionalRetries .. '/' ..
+				MAX_TRANSITIONAL_RETRIES .. ')')
+			C4:UpdateProperty ('Lock Detail', 'Moving: ' .. tostring (status.lockState))
+			StartTimer ('transitional', CONFIRM_DELAY_MS, function ()
+				-- Part of verifying our own command: don't let back-off eat it.
+				RefreshStatus ({ bypassBackoff = (State.pendingCommand ~= nil) })
+			end, false)
+			mapped = nil
+		else
+			mapped = 'unknown'
+			C4:UpdateProperty ('Lock Detail', 'Stuck: ' .. tostring (status.lockState))
+			if (State.transitionalRetries == MAX_TRANSITIONAL_RETRIES + 1) then
+				LogError ('lock still reports "' .. tostring (status.lockState) .. '" after ' ..
+					MAX_TRANSITIONAL_RETRIES .. ' re-checks - reporting unknown; ' ..
+					'normal polling continues')
+			end
+		end
 
 	elseif (status.lockState == nil) then
 		-- Field absent entirely (partial payload / wrong endpoint). Not the
@@ -665,16 +768,34 @@ local function ApplyStatus (status)
 		LogError (JSON:encode (status) or '<could not encode>')
 	end
 
+	-- A real locked/unlocked reading means any earlier fault has cleared, so
+	-- the next jam or calibration error is a new event.
+	if (mapped == 'locked' or mapped == 'unlocked') then
+		State.activeFault = nil
+	end
+
 	-- Publish the lock state, unless the motor is mid-travel (mapped == nil),
 	-- in which case the last known state is held until the re-poll lands.
 	if (mapped ~= nil) then
-		-- If we did not issue the change ourselves, it happened at the door -
-		-- keypad, fingerprint, thumbturn - so report it as a manual action.
-		local ours = (State.pendingCommand ~= nil)
-		NotifyLockState (mapped,
-			ours and 'Control4' or 'SwitchBot',
-			not ours,
-			ours and 'Control4 command' or 'Changed at the lock')
+		-- Attribution:
+		--   inside a pending-command window  -> Control4
+		--   first reading since boot/reset   -> initial sync, not a manual act
+		--   an indeterminate 'unknown'        -> not a manual act either
+		--   anything else                    -> keypad, fingerprint, thumbturn
+		local synced = (State.lockState ~= 'unknown')
+		local source, manual, description
+
+		if (ours) then
+			source, manual, description = 'Control4', false, 'Control4 command'
+		elseif (mapped == 'unknown') then
+			source, manual, description = 'SwitchBot', false, 'No reliable state'
+		elseif (not synced) then
+			source, manual, description = 'SwitchBot', false, 'Initial state'
+		else
+			source, manual, description = 'SwitchBot', true, 'Changed at the lock'
+		end
+
+		NotifyLockState (mapped, source, manual, description)
 		C4:UpdateProperty ('Lock Status', mapped)
 		MirrorLockStateToContact (mapped)
 	end
@@ -697,15 +818,29 @@ local function ApplyStatus (status)
 		NotifyBattery (status.battery)
 	end
 
-	-- Reconcile any optimistic command.
+	-- Reconcile the pending command.
 	if (State.pendingCommand ~= nil and mapped ~= nil) then
 		if (State.pendingCommand == mapped) then
 			DbgBasic ('command confirmed: ' .. mapped)
+			ClearPending ()
+
+		elseif (mapped == 'fault') then
+			LogError ('command "' .. State.pendingCommand ..
+				'" did not take effect - device reports a fault')
+			ClearPending ()
+
+		elseif (ours) then
+			-- Cloud telemetry commonly trails the motor by several seconds.
+			-- Not a failure yet; the later verification reads will tell.
+			DbgBasic ('command "' .. State.pendingCommand ..
+				'" not yet reflected (device reports "' .. mapped .. '"); waiting')
+
 		else
 			LogError ('command "' .. State.pendingCommand ..
-				'" did not take effect - device reports "' .. mapped .. '"')
+				'" did not take effect within ' .. math.floor (PENDING_WINDOW_MS / 1000) ..
+				's - device reports "' .. mapped .. '"')
+			ClearPending ()
 		end
-		State.pendingCommand = nil
 	end
 
 	DbgBasic (string.format (
@@ -753,7 +888,10 @@ local function GetDeviceId ()
 	return string.match (sel, '%((.-)%)$') or sel
 end
 
-function RefreshStatus ()
+-- opts.bypassBackoff: see ApiRequest. Background polling passes nothing.
+function RefreshStatus (opts)
+	if (type (opts) ~= 'table') then opts = nil end
+
 	local deviceId = GetDeviceId ()
 	if (deviceId == nil) then
 		DbgBasic ('refresh skipped: no device selected')
@@ -766,7 +904,18 @@ function RefreshStatus ()
 		else
 			C4:UpdateProperty ('Last Sync', os.date ('%Y-%m-%d %H:%M:%S') .. ' (failed)')
 		end
-	end)
+	end, opts)
+end
+
+-- Fires if a command was acked but never showed up in telemetry (and no read
+-- landed to say either way). Clears the pending state so later changes are not
+-- mis-attributed to Control4, then takes one last look at the real state.
+local function OnPendingExpired ()
+	if (State.pendingCommand == nil) then return end
+	LogError ('command "' .. State.pendingCommand .. '" not confirmed within ' ..
+		math.floor (PENDING_WINDOW_MS / 1000) .. 's; re-reading device state')
+	ClearPending ()
+	RefreshStatus ({ bypassBackoff = true })
 end
 
 local function SendLockCommand (command)
@@ -783,6 +932,7 @@ local function SendLockCommand (command)
 
 	State.inFlight = true
 	State.pendingCommand = (command == 'lock') and 'locked' or 'unlocked'
+	State.pendingSince = Now ()
 
 	ApiRequest ('POST', PATH_DEVICES .. '/' .. deviceId .. '/commands', {
 		command     = command,
@@ -795,19 +945,30 @@ local function SendLockCommand (command)
 		-- re-read real device state before trusting the UI.
 		if (ok) then
 			DbgBasic ('command "' .. command .. '" accepted; confirming actual state')
-			StartTimer ('confirm', CONFIRM_DELAY_MS, RefreshStatus, false)
-			-- Second look: an EU multipoint lock can still be travelling at
-			-- the first check, which would read as a spurious failure.
-			StartTimer ('confirm2', CONFIRM_DELAY_MS * 3, RefreshStatus, false)
+
+			-- The window runs from the ack, not from the send.
+			State.pendingSince = Now ()
+
+			-- Verification reads bypass back-off. They stop as soon as one
+			-- confirms the command (ClearPending cancels the rest).
+			local function verify () RefreshStatus ({ bypassBackoff = true }) end
+			StartTimer ('confirm',  CONFIRM_DELAY_MS,     verify, false)
+			StartTimer ('confirm2', CONFIRM_DELAY_MS * 3, verify, false)
+			StartTimer ('confirm3', CONFIRM_DELAY_MS * 6, verify, false)
+			StartTimer ('pendingExpiry', PENDING_WINDOW_MS + 1000, OnPendingExpired, false)
 		else
 			LogError ('command "' .. command .. '" failed; re-reading device state')
-			State.pendingCommand = nil
-			RefreshStatus ()
+			ClearPending ()
+			-- Must bypass back-off: the failure above just entered it, and this
+			-- read is what lets the UI show the lock's real state.
+			RefreshStatus ({ bypassBackoff = true })
 		end
-	end)
+	end, { bypassBackoff = true })
 end
 
-function DiscoverDevices ()
+function DiscoverDevices (opts)
+	if (type (opts) ~= 'table') then opts = nil end
+
 	ApiRequest ('GET', PATH_DEVICES, nil, function (ok, decoded)
 		if (not ok or not decoded or not decoded.body) then
 			LogError ('device discovery failed')
@@ -842,7 +1003,7 @@ function DiscoverDevices ()
 		end
 
 		C4:UpdatePropertyList ('Device Selection', table.concat (found, ','), keep or found [1])
-	end)
+	end, opts)
 end
 
 -- ============================================================================
@@ -885,7 +1046,7 @@ function RFP.TOGGLE (idBinding, strCommand, tParams)
 	else
 		-- Never guess which way to move a deadbolt from an unknown state.
 		LogError ('TOGGLE ignored: lock state is unknown. Refreshing status instead.')
-		RefreshStatus ()
+		RefreshStatus ({ bypassBackoff = true })
 	end
 end
 
@@ -939,7 +1100,7 @@ local function HandleRelayCommand (strCommand)
 			SendLockCommand ('lock')
 		else
 			LogError ('relay ' .. strCommand .. ' ignored: lock state unknown')
-			RefreshStatus ()
+			RefreshStatus ({ bypassBackoff = true })
 		end
 	else
 		DbgVerbose ('unhandled relay command: ' .. tostring (strCommand))
@@ -975,10 +1136,12 @@ end
 
 -- ============================================================================
 -- Composer actions / commands
+-- Manual actions bypass back-off: a dealer pressing a button wants an answer,
+-- not a silent no-op because a poll failed a minute ago.
 -- ============================================================================
 
-function EX.DISCOVER_DEVICES () DiscoverDevices () end
-function EX.REFRESH_STATUS ()   RefreshStatus ()   end
+function EX.DISCOVER_DEVICES () DiscoverDevices ({ bypassBackoff = true }) end
+function EX.REFRESH_STATUS ()   RefreshStatus ({ bypassBackoff = true })   end
 
 -- SwitchBot documents a third command, "deadbolt", described only as
 -- "disengage deadbolt or latch". That description is ambiguous and users have
@@ -1009,7 +1172,7 @@ function EX.LOG_RAW_STATUS ()
 		else
 			print ('[SwitchBot] RAW STATUS request failed.')
 		end
-	end)
+	end, { bypassBackoff = true })
 end
 
 function EX.RESEND_CONTACT_STATE ()
@@ -1026,7 +1189,7 @@ function EX.TEST_CONNECTION ()
 			print ('[SwitchBot] Connection FAILED. Check OpenToken and SecretKey.')
 			C4:UpdateProperty ('Connection Status', 'Authentication failed')
 		end
-	end)
+	end, { bypassBackoff = true })
 end
 
 function ExecuteCommand (strCommand, tParams)
@@ -1065,6 +1228,42 @@ local function ReportVersion (context)
 	C4:UpdateProperty ('Driver Version', DRIVER_VERSION)
 end
 
+-- Discovery + polling restart after a credential change. Debounced so that
+-- entering OpenToken and SecretKey back to back costs one discovery, not two.
+local function ScheduleCredentialSetup ()
+	StartTimer ('credentials', CREDENTIAL_DEBOUNCE_MS, function ()
+		local token  = Properties ['OpenToken'] or ''
+		local secret = Properties ['SecretKey'] or ''
+		if (token ~= '' and secret ~= '') then
+			DiscoverDevices ({ bypassBackoff = true })
+			StartPolling ()
+		else
+			C4:UpdateProperty ('Connection Status', 'Not configured')
+		end
+	end, false)
+end
+
+-- Everything that belongs to one particular lock. Called when the dealer
+-- selects a different device, so nothing from the old lock leaks into the new.
+local function ResetDeviceState ()
+	-- NotifyLockState must run while State.lockState still differs from
+	-- 'unknown'; it sets State.lockState itself.
+	NotifyLockState ('unknown', 'SwitchBot', false, 'Device changed')
+	C4:UpdateProperty ('Lock Status', 'unknown')
+
+	State.doorState = 'unknown'
+	State.batteryStatus = nil
+	State.batteryPct = nil
+	State.lowBatteryFired = false
+	State.activeFault = nil
+	State.transitionalRetries = 0
+	State.stale = false
+	State.lastGoodSync = nil
+	State.contact = {}
+	ClearPending ()
+	CancelTimer ('transitional')
+end
+
 function OnDriverInit ()
 	C4:AllowExecute (true)
 	math.randomseed (Now ())
@@ -1080,6 +1279,13 @@ function OnDriverLateInit ()
 
 	-- Start from unknown rather than assuming a state we have not read.
 	NotifyLockState ('unknown')
+
+	-- From here on property changes are real changes. Director replays every
+	-- saved property through OnPropertyChanged during load; acting on those
+	-- ran discovery and polling setup several times per boot. This function
+	-- already reads every property itself.
+	State.activeDeviceId = GetDeviceId ()
+	State.ready = true
 
 	local token  = Properties ['OpenToken'] or ''
 	local secret = Properties ['SecretKey'] or ''
@@ -1105,24 +1311,32 @@ end
 function OnPropertyChanged (strProperty)
 	DbgVerbose ('property changed: ' .. tostring (strProperty))
 
+	if (not State.ready) then
+		-- Load-time replay of saved values; OnDriverLateInit handles it all.
+		return
+	end
+
 	if (strProperty == 'OpenToken' or strProperty == 'SecretKey') then
-		-- Credentials changed: drop any back-off and re-discover.
+		-- Credentials changed: drop any back-off, then (debounced) re-discover.
 		State.failures = 0
 		State.backoffUntil = 0
-
-		local token  = Properties ['OpenToken'] or ''
-		local secret = Properties ['SecretKey'] or ''
-		if (token ~= '' and secret ~= '') then
-			DiscoverDevices ()
-			StartPolling ()
-		else
-			C4:UpdateProperty ('Connection Status', 'Not configured')
-		end
+		ScheduleCredentialSetup ()
 
 	elseif (strProperty == 'Device Selection') then
-		State.lockState = 'unknown'
-		NotifyLockState ('unknown')
-		RefreshStatus ()
+		-- Discovery rewrites this list and may re-select the same lock, which
+		-- would otherwise reset state and cost a request for nothing.
+		local id = GetDeviceId ()
+		if (id == State.activeDeviceId) then
+			DbgVerbose ('device selection unchanged (' .. tostring (id) .. ')')
+			return
+		end
+
+		DbgBasic ('device changed: ' .. tostring (State.activeDeviceId) .. ' -> ' .. tostring (id))
+		State.activeDeviceId = id
+		ResetDeviceState ()
+		if (id ~= nil) then
+			RefreshStatus ({ bypassBackoff = true })
+		end
 
 	elseif (strProperty == 'Poll Frequency') then
 		StartPolling ()
@@ -1169,6 +1383,7 @@ end
 
 function OnDriverDestroyed ()
 	DbgBasic ('OnDriverDestroyed - cleaning up timers')
+	State.ready = false
 	for name, _ in pairs (Timers) do
 		CancelTimer (name)
 	end
